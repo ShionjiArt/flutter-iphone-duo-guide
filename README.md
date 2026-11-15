@@ -4,7 +4,14 @@
 
 ## 概览
 
-一个 Flutter app 要在 iPhone Duo 上表现正确，需要处理四件事：用 iOS 27.1 SDK 编译、实时检测折叠状态、把导航和顶栏放进状态栏所在的位置、修正展开后的界面方向。本手册来自 [PiliPlus](https://github.com/ShionjiART/PiliPlus) 的适配，所有结论都在 iOS 27.1 的 iPhone Duo 模拟器上验证过；真机未验证。
+一个 Flutter app 要在 iPhone Duo 上表现正确，需要处理四件事：用 iOS 27.1 SDK 编译、实时检测折叠状态、把导航和顶栏放进状态栏所在的位置、修正展开后的界面方向。本手册来自 [PiliPlus](https://github.com/ShionjiART/PiliPlus) 的适配，结论主要在 iOS 27.1 的 iPhone Duo 模拟器上验证；合上状态冷启动、展开、画中画也在 iPhone Duo 真机（iOS 27.1）上验证过，展开竖屏的顶栏还没在真机上确认。
+
+对应的代码（PiliPlus 的 `release` 分支）：
+
+- 折叠检测：[`lib/utils/ios/foldable_helper.dart`](https://github.com/ShionjiART/PiliPlus/blob/release/lib/utils/ios/foldable_helper.dart)
+- 原生部分（系统标签栏、竖栏按钮、铰链处理、顶栏位置）：[`ios/Runner/SceneDelegate.swift`](https://github.com/ShionjiART/PiliPlus/blob/release/ios/Runner/SceneDelegate.swift)
+- Dart 端的标签栏和竖栏按钮：[`lib/utils/ios/native_*.dart`](https://github.com/ShionjiART/PiliPlus/tree/release/lib/utils/ios)
+- 左右安全区：[`lib/common/widgets/view_safe_area.dart`](https://github.com/ShionjiART/PiliPlus/blob/release/lib/common/widgets/view_safe_area.dart)
 
 | 项目 | 外屏（合上） | 内屏（展开） |
 | --- | --- | --- |
@@ -18,7 +25,7 @@
 
 1. **编译**：iOS 27.1 以下的 SDK 编译的 app，在内屏上以兼容模式小窗运行。
 2. **折叠检测**：展开或合上时窗口尺寸会变，Flutter 里缓存过的布局值必须改成实时读取。
-3. **竖状态栏**：时间、Wi-Fi 在机身一侧的竖条里。原生 app 会把导航放进去，Flutter 只会把它当安全区空着。展开竖屏时状态栏只占右上角，页面顶栏要放进那一行（见「布局规范：栏放在哪里」）。
+3. **竖状态栏**：时间、Wi-Fi 在机身一侧的竖条里。原生 app 的标签栏和返回键会自动放进去，Flutter 只会把它当安全区空着。展开竖屏时状态栏只占右上角，页面顶栏要放进那一行（见「布局规范：栏放在哪里」）。
 4. **方向**：合上时锁竖屏的 app，展开后界面会转错 90° 或 180°，需要原生代码修正。
 
 ## 构建与运行环境
@@ -28,7 +35,8 @@
 - **SDK**：编译后用 `PlistBuddy -c "Print :DTSDKName" Runner.app/Info.plist` 确认是 `iphoneos27.1`。
 - **CI**：截至 2026-10，GitHub 托管的 `macos-26` 最高只有 Xcode 26.6，预览版 `xcode-27` 只有 27.0 beta，都不够。需要等镜像更新，或用自建 runner。
 - **模拟器**：Xcode 27 里没有 Simulator.app，换成了 `Xcode.app/Contents/Applications/DeviceHub.app`。窗口底部的 Closed / Partially Open / Open 按钮用来模拟合上、半开、展开。
-- **flutter run 不可用**：Duo 模拟器报告的架构是 `arm64e.x1`，Flutter 3.47.8 不认识，报 `No Xcode build settings have been found`。
+- **Flutter SDK**：PiliPlus 只能用打过补丁的 SDK 编译，见 PiliPlus 仓库 [`CLAUDE.md`](https://github.com/ShionjiART/PiliPlus/blob/release/CLAUDE.md)「构建」一节。
+- **flutter run 不可用**：Duo 模拟器报告的架构是 `arm64e.x1`，写这份手册时的 Flutter 3.47.8 不认识，报 `No Xcode build settings have been found`。
 - **不指定设备的 `flutter build ios --simulator` 会编成 x86\_64**，而 iOS 27 模拟器只跑 arm64，安装时报「需要更新」。如果某个依赖只提供 x86\_64 的模拟器版本（PiliPlus 里是极验的 `GT3Captcha-iOS`），arm64 编译会失败，模拟器调试时要暂时去掉它。
 
 模拟器编译与安装（先让 Flutter 只生成配置，再用 xcodebuild 按 arm64 编译）：
@@ -42,6 +50,8 @@ xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
 xcrun simctl install <UDID> build/ios_sim_arm64/Build/Products/Debug-iphonesimulator/Runner.app
 xcrun simctl launch <UDID> <bundle id>
 ```
+
+在干净的构建目录里，`--config-only` 可能要跑两次：第一次可能会在 `ios/Flutter/Generated.xcconfig` 里写入 `EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386 arm64`，导致 arm64 编译失败。运行 xcodebuild 前先检查这一行。
 
 改了 Dart 代码后只需重跑 xcodebuild（它的 Run Script 阶段会重新编译 Dart）。debug 包不接 Flutter 工具也能独立运行。
 
@@ -88,9 +98,45 @@ class _FoldObserver with WidgetsBindingObserver {
 
 ## 竖状态栏布局
 
-系统把竖状态栏作为一侧的安全区（约 84pt）告诉 app；把主导航竖着画进这条里、排在 Wi-Fi 下面，就和原生 app 一致。
+系统把竖状态栏作为一侧的安全区（约 84pt）告诉 app。有两种做法：用系统标签栏，让系统自己把它放进竖栏（PiliPlus 现在的做法）；或者由 Flutter 把导航画进这条安全区（PiliPlus 只作为后备）。
 
-**识别**：iPhone 且 `MediaQuery.viewPaddingOf(context).right >= 72`。普通 iPhone 横屏时灵动岛一侧约 59–62pt，不会误判。设备旋转后状态栏会变成顶部安全区，这时退回原来的布局即可。iOS 27.1 有官方 trait `UITraitCollection.verticalBarEdge`（leading / trailing / unspecified），需要更精确时可以用 platform channel 读它。
+### 系统标签栏（iOS 26+ 的 iPhone）
+
+把 `FlutterViewController` 放进 `UITabBarController`，主导航改用系统的液态玻璃标签栏。系统在 Duo 上会把它放进竖栏：合上、展开横拿时在竖栏里，展开竖拿时悬浮在底部。
+
+结构（都在 `SceneDelegate.scene(_:willConnectTo:options:)` 里替换窗口的根控制器）：
+
+```text
+NativePageNavigationController   仅 iOS 27.1 SDK：放返回键和页面按钮，导航栏本身隐藏
+└─ NativeTabBarController        系统标签栏
+   └─ FlutterHostViewController  每个标签一个，只装同一个 FlutterViewController
+      └─ DuoFlutterViewController
+```
+
+- 只有一个 Flutter 视图。切换标签时，把它移到选中标签的容器里（`tabBarController(_:shouldSelect:)`）。
+- 标签内容由 Dart 通过 `piliplus/native_tab_bar` 通道下发，未读数显示为系统角标。进入二级页面时隐藏标签栏。
+- iOS 26 以下或不是 iPhone 时，不替换根控制器，继续用 Flutter 自己画的导航。
+
+这样做有四个坑：
+
+1. **启动停在启动屏**：容器不自动转发出现/消失事件（`shouldAutomaticallyForwardAppearanceMethods` 为 false，这样在标签间移动 Flutter 视图时引擎不会暂停）。于是 `FlutterViewController` 可能一直不创建渲染表面，真机上合上状态冷启动会停在启动屏。要由标签栏控制器手动调 `beginAppearanceTransition` / `endAppearanceTransition`，第一次要等视图进了窗口、布局完再转发。
+2. **安全区为 0**：Flutter 视图不是窗口根控制器时，拿不到系统安全区。由容器在 `viewSafeAreaInsetsDidChange` 里把安全区发给 Dart，在 `main.dart` 的 builder 里覆盖 `MediaQuery` 的内边距。
+3. **方向锁失效**：系统从根控制器读取允许的方向。每一层容器都要把 `supportedInterfaceOrientations` 转给子控制器；Flutter 调 `setNeedsUpdateOfSupportedInterfaceOrientations` 时，也要转给窗口根控制器。
+4. **状态栏样式**：容器要通过 `childForStatusBarStyle`、`childForStatusBarHidden` 等把状态栏交给 Flutter 控制。
+
+**竖栏里的页面按钮**（需要 iOS 27.1 SDK）：在标签栏外面再包一层 `UINavigationController`，导航栏平时隐藏。二级页面时显示导航栏，返回键会出现在竖栏里；一级页面在同一位置放头像、搜索、私信。`toolbarItems` 也会进竖栏，动态详情页的点赞、评论等就放在这里。是否有竖栏用 `traitCollection.verticalBarEdge != .unspecified` 判断，并用 `registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge)` 监听开合。竖栏有返回键时，Flutter 页面左上角的返回键要去掉，否则会有两个（PiliPlus 用 `lib/scripts/material/app_bar_native_back.patch` 给 `AppBar` 加了钩子）。
+
+**视频页隐藏竖栏**：视频页通知原生层后，标签栏控制器在有竖栏时让 `prefersStatusBarHidden` 返回 true，内容铺满竖栏的位置，和官方客户端一样。注意：
+
+- 状态栏隐藏后，竖栏的安全区仍然存在（摄像头在里面）。原生层要把「竖栏已隐藏」告诉 Dart，由 Dart 决定哪些内容可以铺过去：合上时播放器控件继续避开它，下方内容铺满。
+- 不要用 `preferredVerticalBarBehavior = .disabled`：它会把状态栏改回顶部横排，整个布局都会变。只想在某个页面隐藏时，用状态栏的显示/隐藏接口。
+- 底部弹窗在这个页面也要横向铺满，不能再按左右安全区缩进。
+
+### Flutter 自己画（后备）
+
+没有启用系统标签栏时，PiliPlus 把主导航竖着画进这条安全区，排在 Wi-Fi 下面。iOS 27.1 的 Duo 上系统标签栏总会启用，所以这部分只是后备。下面的第 1、3 个坑与导航用哪种做法无关，都要处理。
+
+**识别**：iPhone 且 `MediaQuery.viewPaddingOf(context).right >= 72`。普通 iPhone 横屏时灵动岛一侧约 59–62pt，不会误判。设备旋转后状态栏会变成顶部安全区，这时退回原来的布局即可。原生层可以用 iOS 27.1 的 `UITraitCollection.verticalBarEdge`（leading / trailing / unspecified）更精确地判断，上面的系统标签栏就是这样做的。
 
 **布局**：内容区去掉右侧安全区，导航宽度等于安全区宽度、垂直居中。
 
@@ -126,7 +172,13 @@ Row(children: [
 2. **顶部栏依赖导航模式**：如果首页是否显示搜索栏取决于「是否用底部导航」或「是否竖屏」，状态栏导航模式下要按手机模式处理，否则横拿展开时搜索入口会消失。
 3. **宽度公式要扣安全区**：按 `MediaQuery.size.width` 算分栏宽度、最后才减安全区的写法，在 Duo 上会把侧栏压窄 84pt。PiliPlus 视频页右栏就因此从 280 变成 200，标签重叠、列表溢出。改成先算 `availableWidth = width - padding.horizontal`，再套公式。iPad 没有这条栏，所以上游一般没碰到过。
 
-二级页面也要检查：没有读左右安全区的页面，内容会铺到状态栏下面。
+### 二级页面
+
+没有读左右安全区的页面，内容会铺到竖栏下面。PiliPlus 的做法：
+
+- `Routes.getPages` 里的命名路由统一套上 `SideSafeArea`：按左右安全区留出内边距，同时从 `MediaQuery` 里移除，已经自己处理的页面不会重复留白。主页、视频页、直播间自己处理，不套。
+- 用 `Get.to(...)` 直接打开的页面不走命名路由，改用 `Get.toSafe(...)`，效果相同。
+- 播放器的顶栏、底栏和隐藏控件时的细进度条，始终避开左右安全区；否则合上时最右边的按钮会被竖栏盖住，点不到。
 
 ## 布局规范：栏放在哪里
 
@@ -294,7 +346,10 @@ class DuoFlutterViewController: FlutterViewController {
   customModule="Runner" customModuleProvider="target" sceneMemberID="viewController">
 ```
 
-3. Dart 侧不用改。合上后窗口变小，折叠检测会重新调 `portraitUpMode()`，外屏的竖屏锁就恢复了。
+3. 如果用了上面的系统标签栏，根控制器不再是这个子类。`supportedInterfaceOrientations` 要一层层转下来，`setNeedsUpdateOfSupportedInterfaceOrientations` 也要转给窗口根控制器，否则修复不生效。
+4. Dart 侧不用改。合上后窗口变小，折叠检测会重新调 `portraitUpMode()`，外屏的竖屏锁就恢复了。
+
+UIHinge 只在 iOS 27.1 SDK（Xcode 27、Swift 6.4）里有。用 `#if compiler(>=6.4)` 包住，旧版 Xcode 也能编译，只是没有铰链处理。
 
 时序已在模拟器日志里确认：铰链变成半开（角度约 1.7 rad）比屏幕切换早约 0.1–0.2 秒，足够清掉锁定。
 
@@ -368,11 +423,20 @@ final r = v.devicePixelRatio, p = v.viewPadding;
 debugPrint('size ${v.physicalSize / r} pad L${p.left / r} T${p.top / r} R${p.right / r} B${p.bottom / r}');
 ```
 
-**截图**：`xcrun simctl io <UDID> screenshot` 只截内屏，合上时是黑屏；外屏用 Device Hub 自带的截图按钮。
+**截图**：不加参数的 `xcrun simctl io <UDID> screenshot` 只截内屏，合上时是黑屏。用 `--display` 指定屏幕：
+
+```bash
+xcrun simctl io <UDID> screenshot --display=1 folded.png    # 外屏（合上）
+xcrun simctl io <UDID> screenshot --display=3 unfolded.png  # 内屏（展开）
+```
+
+也可以用 Device Hub 自带的截图按钮。
 
 必测场景：
 
-- [ ] 合上：手机布局，导航在竖状态栏 Wi-Fi 下面
+- [ ] 合上：手机布局，标签栏在竖状态栏里
+- [ ] 进入二级页面：标签栏隐藏，竖栏里有返回键，页面左上角没有第二个返回键
+- [ ] 视频页：竖栏隐藏，内容铺满；返回后竖栏恢复
 - [ ] 合上时把设备横过来：普通页面保持竖屏
 - [ ] 合上 → 展开：界面正向、平板布局（至少来回两次）
 - [ ] 合上 → 半开 → 全开：界面正向
@@ -386,11 +450,11 @@ debugPrint('size ${v.physicalSize / r} pad L${p.left / r} T${p.top / r} R${p.rig
 
 ## 已知限制与未验证事项
 
-以下几点在模拟器上没法确认，或这次没有处理。
+以下几点还没有确认，或者没有处理。
 
-- **真机未验证**：铰链事件早于屏幕切换的时序，只在模拟器上观察过。真机上快速甩开时是否一样，需要实测。
+- **真机上的时序**：铰链事件早于屏幕切换约 0.1–0.2 秒，是在模拟器日志里测的。真机上正常展开没有问题，快速甩开时是否一样还没专门测过。
 - **状态栏在顶部时**：展开竖屏时状态栏只占右上角，页面顶栏已按「展开竖屏：顶栏放进状态栏那一行」放进这一行（PiliPlus [#52](https://github.com/ShionjiART/PiliPlus/pull/52)、[#58](https://github.com/ShionjiART/PiliPlus/pull/58)、[#59](https://github.com/ShionjiART/PiliPlus/pull/59)），还没在真机上确认。
-- **二级页面**：PiliPlus 合上时的视频详情页，内容会铺到右侧状态栏下面（「关注」按钮等）。各个 app 的二级页都要单独检查左右安全区。
+- **旧 Xcode**：用 Xcode 26 编译（跳过铰链代码）没有实测。
 - **窄侧栏里的列表项**：侧栏在公式的最小宽度（PiliPlus 是 280pt）时，横排视频卡片仍会溢出 2–25 像素。这是上游在最小宽度下本来就有的问题，release 包里只是裁掉，不显示条纹。
-- **原生部分依赖当前的 Flutter 实现**：修复假设 Flutter 用 `supportedInterfaceOrientations` 和 `requestGeometryUpdate` 实现方向锁（Flutter 3.47.8）。升级 Flutter 后要重新跑一遍上面的必测场景。以后 Flutter 如果自己实现了 `UIWindowSceneDelegate.supportedInterfaceOrientations(for:)`，也需要重新评估。
-- **竖状态栏的官方 API 只接了一部分**：`reservedRegions`、`.bar(onEdge:extent:)` 和 `verticalBarEdge` 已用于展开竖屏的顶栏位置（见「用系统给的位置，不写死」）；`UIViewController.preferredVerticalBarBehavior`（可以关掉竖状态栏，适合全屏播放器）还没接，竖栏判断也还在用「侧边安全区 ≥ 72」。
+- **原生部分依赖当前的 Flutter 实现**：修复假设 Flutter 用 `supportedInterfaceOrientations` 和 `requestGeometryUpdate` 实现方向锁（写手册时是 Flutter 3.47.8，现在是 3.47.9）。升级 Flutter 后要重新跑一遍上面的必测场景。以后 Flutter 如果自己实现了 `UIWindowSceneDelegate.supportedInterfaceOrientations(for:)`，也需要重新评估。系统标签栏手动转发出现/消失事件，也依赖 `FlutterViewController` 当前创建渲染表面的时机。
+- **竖状态栏的官方 API 只接了一部分**：`reservedRegions`、`.bar(onEdge:extent:)` 和 `verticalBarEdge` 已用于展开竖屏的顶栏位置（见「用系统给的位置，不写死」）；`UIViewController.preferredVerticalBarBehavior`（可以关掉竖状态栏，适合全屏播放器）还没接，Flutter 自己画的后备导航判断竖栏也还在用「侧边安全区 ≥ 72」（系统标签栏一侧已用 `verticalBarEdge`）。
